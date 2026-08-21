@@ -55,7 +55,9 @@ them):
    `(serializeVarElemsAux t xs varOff).1.size = xs.length * 4`.
    The size is independent of `varOff` and of the bodies. The vector
    decoder takes `count = n` from the schema, and the roundtrip proof
-   uses the encoder's canonical first offset `n * 4`.
+   uses the encoder's canonical first offset `n * 4`. The list decoder
+   recovers `count` from `off₀ / 4`, so encoder output yields
+   `count = xs.length`.
 3. **Size walker** (`size_serializeVarElemsAux_le_max`):
    `(serializeVarElemsAux t xs varOff).1.size + .2.size ≤
    xs.length * (BYTES_PER_LENGTH_OFFSET + maxByteLength t)`.
