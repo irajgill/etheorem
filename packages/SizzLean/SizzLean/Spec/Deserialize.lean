@@ -176,7 +176,7 @@ supplied `count` offsets starting at `off`.
 
 `protected` (was `private`): the variable-element collection
 roundtrip proof reasons through this walker's branches, so it must
-be reachable, but it is proof-internal, not part of the general
+be reachable. It stays proof-internal and off the general
 `SizzLean.Spec` surface. Same convention as `extractFieldOffsets`;
 the proof file names it with an explicit
 `open SizzLean.Spec (extractCollOffsets)`. -/

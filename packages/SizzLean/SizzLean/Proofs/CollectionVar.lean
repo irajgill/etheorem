@@ -12,13 +12,15 @@ Variable-element collections (`.vector t n` / `.list t cap` with
 ([`Spec/Serialize.lean`](../Spec/Serialize.lean)'s
 `serializeVarElemsAux`, [`Spec/Deserialize.lean`](../Spec/Deserialize.lean)'s
 non-`isFixedSize` `.vector` / `.list` branches) fully implements the
-offset-table wire format, but no `BasicSupported` constructor claims
-it yet, and no theorem closes it. This module lays the groundwork;
-the predicates (`vectorVar` / `listVar` on `BasicSupported` /
+offset-table wire format. No `BasicSupported` constructor claims it
+yet, and no theorem closes it. This module holds the codec-level
+groundwork.
+
+The predicates (`vectorVar` / `listVar` on `BasicSupported` /
 `Supported` / `SupportedBounded`) and the roundtrip walkers land in
-a follow-up, once this file's lemmas are available to build on and
-once `containerVar` is on `main` (the `BasicSupported` matchers grow
-two constructors; that arm must already be exhaustive).
+a follow-up. That follow-up builds on this file's lemmas and needs
+`containerVar` on `main`. Its `BasicSupported` matchers grow two
+constructors, and that match must already be exhaustive.
 
 Homogeneous collections have one element type `t`, so the proof
 inducts on the element list as `Proofs/FixedElems.lean` does. The
@@ -43,8 +45,8 @@ the total width of the offset table): each element appends a
 body to the `.2` accumulator, then advances `varOff` by the body's
 size. The decoder's `extractCollOffsets` reads `count` placeholders
 back out, before `deserializeVarElems` uses them to slice each
-body. Vectors take `count = n` and reject `n = 0`; lists recover
-`count` from `off₀ / 4`, with the empty buffer the empty list.
+body. Vectors take `count = n` and reject `n = 0`. Lists recover
+`count` from `off₀ / 4`; an empty buffer decodes to the empty list.
 
 ## Lemma path
 
@@ -58,10 +60,9 @@ them):
    order). Homogeneous analogue of `varOffsetsOf`.
 2. **Encoder accounting** (`size_serializeVarElemsAux_offs`):
    `(serializeVarElemsAux t xs varOff).1.size = xs.length * 4`.
-   Independent of `varOff` and of the bodies. At the encoder's seed
-   `varOff = n * 4`, the first encoded offset is `n * 4`. The vector
-   decoder takes `count = n` from the schema. The later roundtrip
-   proof uses the encoder's canonical offset.
+   The size is independent of `varOff` and of the bodies. The vector
+   decoder takes `count = n` from the schema, and the roundtrip proof
+   uses the encoder's canonical first offset `n * 4`.
 3. **Size walker** (`size_serializeVarElemsAux_le_max`):
    `(serializeVarElemsAux t xs varOff).1.size + .2.size ≤
    xs.length * (BYTES_PER_LENGTH_OFFSET + maxByteLength t)`.
@@ -101,10 +102,9 @@ open SizzLean.Spec (extractCollOffsets)
 
 /-! ### Offset-list plumbing -/
 
-/-- Expected running element offsets: the list the encoder's
-placeholders *should* decode back to, mirroring
-`serializeVarElemsAux`'s own walk exactly (one entry per element,
-in order). Homogeneous analogue of `varOffsetsOf`. -/
+/-- Expected running element offsets: entry `i` holds the `varOff`
+value live when the encoder wrote element `i`. Homogeneous analogue
+of `varOffsetsOf`. -/
 def collOffsetsOf (t : SSZType) : List t.interp → Nat → List Nat
   | [],      _      => []
   | x :: xs, varOff =>
@@ -155,8 +155,8 @@ theorem size_serializeVarElemsAux_offs
 
 /-- Reading the first offset placeholder back off the front of a
 non-empty collection's own encoded output recovers the seeded
-`varOff`. The list decoder's `readUInt32LE b 0` is this lemma at
-`pre = .empty`; combined with `toNat_toUInt32_of_lt` it yields
+`varOff`. The list decoder performs the same read (`readUInt32LE b
+0`); combined with `toNat_toUInt32_of_lt` it yields
 `count = firstOff / 4`. -/
 theorem readUInt32LE_serializeVarElemsAux_cons
     (t : SSZType) (x : t.interp) (xs : List t.interp) (varOff : Nat) :
@@ -180,8 +180,8 @@ Every element contributes `≤ maxByteLength t` to the body side and
 exactly 4 bytes to the offset table. Feeds both the
 `encode_size_le_max` `vectorVar` / `listVar` arms and the
 uint32-overflow guard the offset-extraction inverse below depends
-on. The per-element bound is taken on all of `t.interp` (the shape
-`encode_size_le_max` will supply), not merely the elements of `xs`. -/
+on. The hypothesis `h_max` quantifies over all of `t.interp`,
+matching the shape `encode_size_le_max` supplies. -/
 theorem size_serializeVarElemsAux_le_max
     (t : SSZType) (xs : List t.interp) (varOff : Nat)
     (h_max : ∀ y : t.interp,
