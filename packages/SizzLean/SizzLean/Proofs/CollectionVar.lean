@@ -78,7 +78,12 @@ them):
    `deserializeVarElems` recovers the encoded list, given the
    body-region extract invariant. Parameterised by the element
    roundtrip.
-6. **Top-level arms** (`decode_encode_vectorVar` /
+6. **Shared decode step** (`decode_serializeVarElemsAux`): items 2,
+   4 and 5 composed against the encoder's own buffer, yielding the
+   total size, the offset table, and the element list. Both
+   roundtrip arms call it; only the decoder's schema guards differ
+   between them.
+7. **Top-level arms** (`decode_encode_vectorVar` /
    `decode_encode_listVar`, `encode_size_le_max_vectorVar` /
    `encode_size_le_max_listVar`): the dispatcher-facing wrappers.
    Vectors reject `n = 0`; lists split on the empty-buffer
@@ -113,25 +118,6 @@ def collOffsetsOf (t : SSZType) : List t.interp → Nat → List Nat
   | [],      _      => []
   | x :: xs, varOff =>
       varOff :: collOffsetsOf t xs (varOff + (SSZType.serialize t x).size)
-
-/-- `collOffsetsOf` produces one offset per element. -/
-theorem collOffsetsOf_length
-    (t : SSZType) (xs : List t.interp) (varOff : Nat) :
-    (collOffsetsOf t xs varOff).length = xs.length := by
-  induction xs generalizing varOff with
-  | nil => rfl
-  | cons _ xs ih =>
-    unfold collOffsetsOf
-    simp [ih]
-
-/-- The first placeholder a non-empty collection writes is the
-seeded `varOff`. At the encoder's call site that seed is
-`xs.length * BYTES_PER_LENGTH_OFFSET`. The vector roundtrip uses
-this canonical encoder value. The list decoder uses it to recover
-`count = firstOff / 4`. -/
-theorem collOffsetsOf_head_cons
-    (t : SSZType) (x : t.interp) (xs : List t.interp) (varOff : Nat) :
-    (collOffsetsOf t (x :: xs) varOff).head? = some varOff := rfl
 
 /-! ### Encoder accounting and the size walker -/
 
@@ -458,6 +444,57 @@ theorem deserializeVarElems_collOffsetsOf
       (by omega) hEndLeSize hTailBody]
     rfl
 
+/-- **Shared decode step** for both variable-element collections.
+Given the encoder's own output, this recovers the three facts the
+`vectorVar` and `listVar` roundtrips both need before they part
+ways at the decoder's schema guards: the buffer's total size, the
+offset table read back as `collOffsetsOf`, and the element list
+read back by `deserializeVarElems`.
+
+The buffer `b` is passed as its own term (with `h_ser` pinning it
+to `offs ++ bodies`) so each caller can hand in its own
+`SSZType.serialize` application without unfolding it first.
+`h_varOff` fixes the seed to the encoder's canonical
+`xs.length * BYTES_PER_LENGTH_OFFSET`, which is what makes the
+offset table exactly `varOff` bytes wide, so the body region
+starts at `varOff`. `h_bound` is the uint32-overflow guard each
+caller derives from its own `maxByteLength` specialization. -/
+theorem decode_serializeVarElemsAux
+    (t : SSZType)
+    (h_decode_encode_t : ∀ y : t.interp,
+      SSZType.deserialize t (SSZType.serialize t y) =
+        .ok (y, (SSZType.serialize t y).size))
+    (xs : List t.interp) (varOff : Nat) (b : ByteArray)
+    (h_varOff : varOff = xs.length * BYTES_PER_LENGTH_OFFSET)
+    (h_ser : b = (SSZType.serializeVarElemsAux t xs varOff).1 ++
+                 (SSZType.serializeVarElemsAux t xs varOff).2)
+    (h_bound : varOff +
+      (SSZType.serializeVarElemsAux t xs varOff).2.size < 2 ^ 32) :
+    b.size = varOff + (SSZType.serializeVarElemsAux t xs varOff).2.size
+    ∧ extractCollOffsets b xs.length 0 =
+        .ok (collOffsetsOf t xs varOff)
+    ∧ SSZType.deserializeVarElems t (collOffsetsOf t xs varOff) b.size b
+        = .ok xs := by
+  have h_offs_size :
+      (SSZType.serializeVarElemsAux t xs varOff).1.size = varOff := by
+    rw [size_serializeVarElemsAux_offs, h_varOff]
+  have h_bsize :
+      b.size = varOff + (SSZType.serializeVarElemsAux t xs varOff).2.size := by
+    rw [h_ser, ByteArray.size_append, h_offs_size]
+  have h_offs :
+      extractCollOffsets b xs.length 0 = .ok (collOffsetsOf t xs varOff) := by
+    have h_pre :=
+      extractCollOffsets_serializeVarElemsAux t xs varOff ByteArray.empty
+        h_bound (SSZType.serializeVarElemsAux t xs varOff).2
+    simpa [ByteArray.empty_append, h_ser] using h_pre
+  have h_body : b.extract varOff b.size =
+      (SSZType.serializeVarElemsAux t xs varOff).2 := by
+    rw [h_bsize, h_ser]
+    exact ByteArray.extract_append_eq_right h_offs_size.symm (by rw [h_offs_size])
+  exact ⟨h_bsize, h_offs,
+    deserializeVarElems_collOffsetsOf t h_decode_encode_t xs varOff b b.size
+      (by omega) (by omega) h_body⟩
+
 /-- Size bound for `.vector t n` with `t` variable-size. Unfolds
 the encoder's `offs ++ bodies` and cites
 `size_serializeVarElemsAux_le_maxByteLength_vector`. -/
@@ -479,9 +516,8 @@ theorem encode_size_le_max_vectorVar
     simp only [h_var, if_false, Bool.false_eq_true]
     rfl
   rw [h_serialize_eq, ByteArray.size_append]
-  have h := size_serializeVarElemsAux_le_maxByteLength_vector t n v.toList
-      varOff h_var h_len h_max_t
-  exact h
+  exact size_serializeVarElemsAux_le_maxByteLength_vector t n v.toList
+    varOff h_var h_len h_max_t
 
 /-- Size bound for `.list t cap` with `t` variable-size. Empty
 lists (size 0) are in-bounds; non-empty lists scale the aux bound
@@ -541,10 +577,6 @@ theorem decode_encode_vectorVar
   have h_offs_size :
       (SSZType.serializeVarElemsAux t v.toList varOff).1.size = varOff := by
     rw [size_serializeVarElemsAux_offs, h_len]
-  have h_bsize :
-      (SSZType.serialize (.vector t n) v).size =
-        varOff + (SSZType.serializeVarElemsAux t v.toList varOff).2.size := by
-    rw [h_serialize_eq, ByteArray.size_append, h_offs_size]
 
   -- Bound every running offset by the UInt32 range.
   have h_bound :=
@@ -561,25 +593,13 @@ theorem decode_encode_vectorVar
     -- `hMaxLength` unfolds `MAX_LENGTH` so `omega` can join `h_le` with `h_max_lt`.
     omega
 
-  -- Recover the encoder's offsets and body slice.
-  have h_offs :
-      extractCollOffsets (SSZType.serialize (.vector t n) v) n 0 =
-        .ok (collOffsetsOf t v.toList varOff) := by
-    have h_pre :=
-      extractCollOffsets_serializeVarElemsAux t v.toList varOff ByteArray.empty
-        h_uint32_bound (SSZType.serializeVarElemsAux t v.toList varOff).2
-    simpa [ByteArray.empty_append, h_serialize_eq, h_len] using h_pre
-  have hBodyRegion :
-      (SSZType.serialize (.vector t n) v).extract varOff
-          (SSZType.serialize (.vector t n) v).size =
-        (SSZType.serializeVarElemsAux t v.toList varOff).2 := by
-    rw [h_bsize, h_serialize_eq]
-    exact ByteArray.extract_append_eq_right h_offs_size.symm (by rw [h_offs_size])
-  have h_elems :=
-    deserializeVarElems_collOffsetsOf t h_decode_encode_t v.toList varOff
-      (SSZType.serialize (.vector t n) v)
-      (SSZType.serialize (.vector t n) v).size
-      (by omega) (by omega) hBodyRegion
+  -- Recover the total size, the encoder's offsets, and the element list.
+  obtain ⟨h_bsize, h_offs, h_elems⟩ :=
+    decode_serializeVarElemsAux t h_decode_encode_t v.toList varOff
+      (SSZType.serialize (.vector t n) v) h_varOff.symm h_serialize_eq
+      h_uint32_bound
+  -- The vector decoder takes its count from the schema, not from `off₀`.
+  rw [h_len] at h_offs
 
   -- Discharge the decoder's schema and size guards.
   have hn : ¬ n = 0 := Nat.ne_of_gt h_pos
@@ -601,9 +621,10 @@ theorem decode_encode_vectorVar
     simp [Array.toArray_toList]
 
 /-- Roundtrip for `.list t cap` with `t` variable-size.
-Empty lists take the decoder's `b.size = 0` branch; non-empty
-lists recover `count` from `off₀ / 4` then reuse the same walker
-as `decode_encode_vectorVar`. -/
+Empty lists take the decoder's `b.size = 0` branch. Non-empty
+lists recover `count` from `off₀ / 4`, then call the same
+`decode_serializeVarElemsAux` step `decode_encode_vectorVar`
+does. -/
 theorem decode_encode_listVar
     (t : SSZType) (cap : Nat)
     (h_var : t.isFixedSize = false)
@@ -662,10 +683,6 @@ theorem decode_encode_listVar
     have h_offs_size :
         (SSZType.serializeVarElemsAux t xs.val.toList varOff).1.size = varOff :=
       size_serializeVarElemsAux_offs t xs.val.toList varOff
-    have h_bsize :
-        (SSZType.serialize (.list t cap) xs).size =
-          varOff + (SSZType.serializeVarElemsAux t xs.val.toList varOff).2.size := by
-      rw [h_serialize_eq, ByteArray.size_append, h_offs_size]
 
     -- Bound every running offset by the UInt32 range.
     have h_bound :=
@@ -707,27 +724,10 @@ theorem decode_encode_listVar
       exact Nat.mul_div_cancel _ hpos
     have h_count_le : ¬ xs.val.toList.length > cap := Nat.not_lt.mpr h_len_le
 
-    -- Recover the encoder's offsets and body slice.
-    have h_offs :
-        extractCollOffsets (SSZType.serialize (.list t cap) xs)
-            (varOff / BYTES_PER_LENGTH_OFFSET) 0 =
-          .ok (collOffsetsOf t xs.val.toList varOff) := by
-      rw [h_div]
-      have h_pre :=
-        extractCollOffsets_serializeVarElemsAux t xs.val.toList varOff ByteArray.empty
-          h_uint32_bound (SSZType.serializeVarElemsAux t xs.val.toList varOff).2
-      simpa [ByteArray.empty_append, h_serialize_eq] using h_pre
-    have hBodyRegion :
-        (SSZType.serialize (.list t cap) xs).extract varOff
-            (SSZType.serialize (.list t cap) xs).size =
-          (SSZType.serializeVarElemsAux t xs.val.toList varOff).2 := by
-      rw [h_bsize, h_serialize_eq]
-      exact ByteArray.extract_append_eq_right h_offs_size.symm (by rw [h_offs_size])
-    have h_elems :=
-      deserializeVarElems_collOffsetsOf t h_decode_encode_t xs.val.toList varOff
-        (SSZType.serialize (.list t cap) xs)
-        (SSZType.serialize (.list t cap) xs).size
-        (by omega) (by omega) hBodyRegion
+    -- Recover the total size, the encoder's offsets, and the element list.
+    obtain ⟨h_bsize, h_offs, h_elems⟩ :=
+      decode_serializeVarElemsAux t h_decode_encode_t xs.val.toList varOff
+        (SSZType.serialize (.list t cap) xs) rfl h_serialize_eq h_uint32_bound
 
     -- Discharge the decoder's size and capacity guards.
     have h_sz_pos : ¬ (SSZType.serialize (.list t cap) xs).size = 0 := by
@@ -748,7 +748,6 @@ theorem decode_encode_listVar
     simp only [h_mod', if_false]
     rw [h_toNat, h_div]
     simp only [h_count_le, if_false]
-    rw [h_div] at h_offs
     rw [h_offs]
     dsimp only
     rw [h_elems]

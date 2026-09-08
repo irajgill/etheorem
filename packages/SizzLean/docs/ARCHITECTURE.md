@@ -123,8 +123,8 @@ complete `BasicSupported` constructor coverage. As of this writing
 `Proofs/UIntWide.lean`, with no `bv_decide` axiom), `bool`,
 `vector` and `list` over fixed-size or variable-size element types,
 `bitvector`, `bitlist` (both via the bit-packing inverse in
-`Proofs/BitPack.lean`), and `container` over any field list.
-Container fields can all be fixed-size
+`Proofs/BitPack.lean`), and `container` over any field list,
+whether every field is fixed-size
 (recursively, the `containerFixed` constructor) or the list mixes
 fixed- and variable-size fields (the `containerVar` constructor,
 decoded via the offset-table codec proved in
@@ -139,9 +139,9 @@ for `containerVar` (etheorem#61) and `vectorVar` / `listVar`
 (etheorem#77). The `SSZ.roundtrip` user-surface corollary mirrors
 the `BasicSupported r.shape` gate. The asterisk on
 "verified by inheritance" is intentional and small: passing
-empirical conformance is what makes both the performance
-investment in Phase 4 and the proof investment in Phase 5 target
-a conformance-tested implementation.
+empirical conformance is what points both the Phase 4 performance
+work and the Phase 5 proof work at an implementation already known
+to match the spec.
 
 **What the cache layer adds.** SSZ's `hash_tree_root` is the dominant cost
 in any consensus-state pipeline: a cold root of `BeaconState` hashes tens
